@@ -10,9 +10,10 @@ include_directories(${OpenCV_INCLUDE_DIRS})
 
 # pcl
 find_package(PCL REQUIRED)
-include_directories(${PCL_INLCUDE_DIRS})
+include_directories(${PCL_INCLUDE_DIRS})
 link_directories(${PCL_LIBRARY_DIRS})
 add_definitions(${PCL_DEFINITIONS})
+add_definitions(-DNOMINMAX)
 
 # tuyang
 include_directories("D:/3rdparty/camport3-master/camport3-master/include")
@@ -22,5 +23,5 @@ add_executable(tuyang_switchplate_2 main.cpp
         inference.h
 )
 target_link_libraries(tuyang_switchplate_2 ${OpenCV_LIBS})
-target_link_libraries(tuyang_switchplate_2 ${PCL_LIBRARY})
+target_link_libraries(tuyang_switchplate_2 ${PCL_LIBRARIES})
 target_link_libraries(tuyang_switchplate_2 "D:/3rdparty/camport3-master/camport3-master/lib/win/hostapp/x64/tycam.lib")
