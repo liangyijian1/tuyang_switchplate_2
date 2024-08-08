@@ -11,6 +11,8 @@
 #include <pcl/visualization/pcl_visualizer.h>
 #include <pcl/sample_consensus/ransac.h>
 #include <pcl/sample_consensus/sac_model_plane.h>
+#include <pcl/common/centroid.h>
+#include <boost/thread/thread.hpp>
 
 using namespace cv;
 
@@ -86,6 +88,45 @@ void visualize(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud1, pcl::PointClou
     }
 }
 
+int cal_centroid(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud) {
+    // ------------------------PCL函数计算质心----------------------------
+    Eigen::Vector4f centroid;					// 质心
+    pcl::compute3DCentroid(*cloud, centroid);	// 齐次坐标，（c0,c1,c2,1）
+    // ------------------------按公式计算质心-----------------------------
+    pcl::PointXYZ p_c{ 0,0,0 }; // 列表初始化，C++11
+
+    for (auto p : cloud->points)
+    {
+        p_c.x += p.x;
+        p_c.y += p.y;
+        p_c.z += p.z;
+    }
+
+    p_c.x /= cloud->points.size();
+    p_c.y /= cloud->points.size();
+    p_c.z /= cloud->points.size();
+
+    // -------------------------- 结果对比--------------------------------
+    cout << "调用函数计算结果：" << centroid.head<3>().transpose() << endl;
+    cout << "公式计算结果：" << p_c << endl;
+    // --------------------------结果可视化-------------------------------
+    boost::shared_ptr<pcl::visualization::PCLVisualizer>viewer(new pcl::visualization::PCLVisualizer("Viewer"));
+    viewer->setBackgroundColor(255, 255, 255);
+    viewer->setWindowName("计算点云的质心");
+    pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> single_color(cloud, 0, 0, 255); // 蓝色
+    viewer->addPointCloud<pcl::PointXYZ>(cloud, single_color, "sample cloud");
+    viewer->addSphere(p_c, 0.0025, 1, 0, 0, "sphere", 0);
+    viewer->addText3D("centroid", p_c, 0.005, 128, 0, 128);
+
+    while (!viewer->wasStopped())
+    {
+        viewer->spinOnce(100);
+        std::this_thread::sleep_for(std::chrono::microseconds(10000));
+    }
+    return 0;
+
+}
+
 int main() {
     utils::logging::setLogLevel(utils::logging::LOG_LEVEL_ERROR);
     Mat img = imread(R"(D:\files\data_0803\815\1\1_color.png)");
@@ -96,7 +137,6 @@ int main() {
         PCL_ERROR ("Couldn't read file test_pcd.pcd \n");
         return (-1);
     }
-
     TY_CAMERA_CALIB_INFO depth_calib;
     TY_CAMERA_CALIB_INFO color_calib;
     depth_calib.intrinsicWidth = 1280;
@@ -167,7 +207,7 @@ int main() {
                 std::vector<std::vector<int>> tmp_point(3, std::vector<int>(1, 0));
                 std::vector<std::vector<int>> bias_vec(4, std::vector<int>(2, 0));
                 int radius = cvRound(circle[2]);
-                int radius_bias = radius + 10;
+                int radius_bias = radius + 15;
                 bias_vec[0][0] = radius_bias;
                 bias_vec[0][1] = 0;
                 bias_vec[1][0] = 0;
@@ -200,7 +240,7 @@ int main() {
                 for (size_t j = 0; j < 4; j++) {
                     int Z = circle_neigh_set[i][j][2][0];
                     if (Z == 0) {
-                        break;
+                        continue;
                     }
                     if (Z < min_Z) {
                         min_Z = Z;
@@ -211,10 +251,22 @@ int main() {
             //可视化最高圆
             Point p(circles[idx_min_Z_circle][0], circles[idx_min_Z_circle][1]);
             cv::circle(show, p, 20, Scalar(255, 255, 255), -1, 1, 0);
-            //配对圆
-            int pair_circle = 0;
-            if (pair_circle == idx_min_Z_circle) {
-                pair_circle = abs(idx_min_Z_circle - 1);
+            int neigh_max = -1;
+            int neigh_max_idx = -1;
+            for (size_t i = 0; i < circle_neigh_set[idx_min_Z_circle].size(); i++) {
+                auto tmp = circle_neigh_set[idx_min_Z_circle][i][2][0];
+                if (tmp == 0) {
+                    neigh_max_idx = i;
+                    break;
+                }
+                if (tmp > neigh_max) {
+                    neigh_max = tmp;
+                    neigh_max_idx = i;
+                }
+            }
+            circle_neigh_set[idx_min_Z_circle].erase(circle_neigh_set[idx_min_Z_circle].begin() + neigh_max_idx);
+            for (auto & circle_neigh : circle_neigh_set[idx_min_Z_circle]) {
+                cv::circle(show, Point(circle_neigh[0][0], circle_neigh[1][0]), 1, Scalar(255, 255, 0), -1, 1, 0);
             }
 
             //将YOLO结果转成XYZ形式，对点云进行裁剪
@@ -248,17 +300,80 @@ int main() {
 
             //平面拟合
             pcl::SampleConsensusModelPlane<pcl::PointXYZ>::Ptr model_plane(new pcl::SampleConsensusModelPlane<pcl::PointXYZ>(cloud_passthrough));
-            pcl::RandomSampleConsensus<pcl::PointXYZ> ransac(model_plane);// 定义RANSAC算法模型
-            ransac.setDistanceThreshold(5);// 设定距离阈值
-            ransac.setMaxIterations(1000);     // 设置最大迭代次数
-            ransac.setProbability(0.99);      // 设置从离群值中选择至少一个样本的期望概率
-            ransac.computeModel();            // 拟合平面
-            std::vector<int> inliers;              // 用于存放内点索引的vector
-            ransac.getInliers(inliers);       // 获取内点索引
+            pcl::RandomSampleConsensus<pcl::PointXYZ> ransac(model_plane);
+            ransac.setDistanceThreshold(5);
+            ransac.setMaxIterations(1000);
+            ransac.setProbability(0.99);
+            ransac.computeModel();
+            std::vector<int> inliers;
+            ransac.getInliers(inliers);
             Eigen::VectorXf coeff;
-            ransac.getModelCoefficients(coeff);  //获取拟合平面参数，coeff分别按顺序保存a,b,c,d
+            ransac.getModelCoefficients(coeff);
             cout << "平面模型系数coeff(a,b,c,d): " << coeff[0] << " \t" << coeff[1] << "\t " << coeff[2] << "\t " << coeff[3] << endl;
-            visualize(cloud, cloud_passthrough);
+            Eigen::Vector4f centroid;					// TODO: 可以使用内点去求中心，提高中心定位精度；该方法要确保点云完整；
+            pcl::compute3DCentroid(*cloud_passthrough, centroid);
+            auto center_point = centroid.head<3>().transpose();
+            cout << "中心计算结果：" << center_point << endl;
+
+            //计算平面法向量
+            Eigen::Vector3d norm;
+            norm[0] = coeff[0];
+            norm[1] = coeff[1];
+            norm[2] = coeff[2];
+            if (norm[2] < 0) {
+                norm = -1 * norm;
+                cout << std::format("norm_ROT_0, norm_ROT_1, norm_ROT_2:{:.3f}, {:.3f}, {:.3f}\n", norm[0], norm[1], norm[2]);
+            }
+
+            Eigen::Vector3d v1;
+            float c1Z = 0;
+            for (auto & neigh_point : circle_neigh_set[idx_min_Z_circle]) {
+                c1Z = c1Z + neigh_point[2][0];
+            }
+            c1Z = c1Z / circle_neigh_set[idx_min_Z_circle].size();
+            auto c1X = (circles[idx_min_Z_circle][0] - color_calib.intrinsic.data[2]) * c1Z / color_calib.intrinsic.data[0];
+            auto c1Y = (circles[idx_min_Z_circle][1] - color_calib.intrinsic.data[5]) * c1Z / color_calib.intrinsic.data[4];
+            cout << std::format("c1 XYZ is : {}, {}, {}", c1X, c1Y, c1Z) << endl;
+            //v1为Y法向量，并固定v1向量方向
+            if (c1X < center_point[0]) {
+                v1[0] = c1X - center_point[0];
+                v1[1] = c1Y - center_point[1];
+                v1[2] = c1Z - center_point[2];
+            }
+            else {
+                cout << "v1方向转变\n";
+                v1[0] = center_point[0] - c1X;
+                v1[1] = center_point[1] - c1Y;
+                v1[2] = center_point[2] - c1Z;
+            }
+            //v2为X向量
+            Eigen::Vector3d v2 = norm.cross(v1);
+            //单位化三个向量
+            norm.normalize();
+            v1.normalize();
+            v2.normalize();
+
+            //垫板->相机
+            Eigen::Matrix3d R_t_c = Eigen::Matrix3d::Identity();
+            R_t_c <<
+                v2[0], v1[0], norm[0],
+                v2[1], v1[1], norm[1],
+                v2[2], v1[2], norm[2];
+            Eigen::Vector3d T_t_c;
+            T_t_c << center_point[0], center_point[1], center_point[2];
+
+            Eigen::Isometry3d RT_t_c = Eigen::Isometry3d::Identity();
+            RT_t_c.rotate(R_t_c);
+            RT_t_c.pretranslate(T_t_c);
+            cout << "垫板->相机:\n" << RT_t_c.matrix() << endl;
+            Eigen::Vector3d eulerAngle = RT_t_c.rotation().eulerAngles(2, 1, 0);
+            eulerAngle[0] = eulerAngle[0] * 180 / M_PI;
+            eulerAngle[1] = eulerAngle[1] * 180 / M_PI;
+            eulerAngle[2] = eulerAngle[2] * 180 / M_PI;
+            cout << "欧拉角为:\n" << eulerAngle << endl;
+            cout << "**************************************\n" << endl;
+
+            //visualize(cloud, cloud_passthrough);
         } //else
 
     }
