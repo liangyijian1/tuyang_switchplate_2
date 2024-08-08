@@ -13,6 +13,7 @@
 #include <pcl/sample_consensus/sac_model_plane.h>
 #include <pcl/common/centroid.h>
 #include <boost/thread/thread.hpp>
+#include <opencv2/core/eigen.hpp>
 
 using namespace cv;
 
@@ -124,8 +125,93 @@ int cal_centroid(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud) {
         std::this_thread::sleep_for(std::chrono::microseconds(10000));
     }
     return 0;
-
 }
+
+bool isRotatedMatrix(Mat& R)        //旋转矩阵的转置矩阵是它的逆矩阵，逆矩阵 * 矩阵 = 单位矩阵
+{
+    Mat temp33 = R({
+    0,0,3,3 }); //无论输入是几阶矩阵，均提取它的三阶矩阵
+    Mat Rt;
+    transpose(temp33, Rt);  //转置矩阵
+    Mat shouldBeIdentity = Rt * temp33;//是旋转矩阵则乘积为单位矩阵
+    Mat I = Mat::eye(3, 3, shouldBeIdentity.type());
+
+    return cv::norm(I, shouldBeIdentity) < 1e-6;
+}
+
+Mat eulerAngleToRotateMatrix(const Mat& eulerAngle, const std::string& seq)
+{
+
+    CV_Assert(eulerAngle.rows == 1 && eulerAngle.cols == 3);//检查参数是否正确
+
+    eulerAngle /= (180 / CV_PI);        //度转弧度
+
+    Matx13d m(eulerAngle);              //<double, 1, 3>
+
+    auto rx = m(0, 0), ry = m(0, 1), rz = m(0, 2);
+    auto rxs = sin(rx), rxc = cos(rx);
+    auto rys = sin(ry), ryc = cos(ry);
+    auto rzs = sin(rz), rzc = cos(rz);
+
+    //XYZ方向的旋转矩阵
+    Mat RotX = (Mat_<double>(3, 3) <<
+        1, 0, 0,
+        0, rxc, -rxs,
+        0, rxs, rxc);
+    Mat RotY = (Mat_<double>(3, 3) <<
+        ryc, 0, rys,
+        0,    1, 0,
+        -rys, 0, ryc);
+    Mat RotZ = (Mat_<double>(3, 3) <<
+        rzc, -rzs, 0,
+        rzs, rzc, 0,
+        0, 0, 1);
+    //按顺序合成后的旋转矩阵
+    cv::Mat rotMat;
+    if (seq == "zyx") rotMat = RotX * RotY * RotZ;
+    else if (seq == "yzx") rotMat = RotX * RotZ * RotY;
+    else if (seq == "zxy") rotMat = RotY * RotX * RotZ;
+    else if (seq == "yxz") rotMat = RotZ * RotX * RotY;
+    else if (seq == "xyz") rotMat = RotZ * RotY * RotX;
+    else if (seq == "xzy") rotMat = RotY * RotZ * RotX;
+    else
+    {
+        cout << "Euler Angle Sequence string is wrong...";
+    }
+    if (!isRotatedMatrix(rotMat))       //欧拉角特殊情况下会出现死锁
+    {
+        cout << "Euler Angle convert to RotatedMatrix failed..." << endl;
+        exit(-1);
+    }
+    return rotMat;
+}
+
+Mat attitudeVectorToMatrix(const Mat& m, const std::string& seq)
+{
+
+    CV_Assert(m.total() == 6);
+    Mat temp = Mat::eye(4, 4, CV_64FC1);
+    Mat rotVec;
+    if (m.total() == 6)
+    {
+        rotVec = m({3,0,3,1 });   //读取存储的欧拉角
+    }
+    //如果seq为空，表示传入的是3*1旋转向量，否则，传入的是欧拉角
+    if (0 == seq.compare(""))
+    {
+        Rodrigues(rotVec, temp({0,0,3,3 }));   //罗德利斯转换
+    }
+    else
+    {
+        eulerAngleToRotateMatrix(rotVec, seq).copyTo(temp({0,0,3,3 }));
+    }
+    //存入平移矩阵
+    temp({
+    3,0,1,3 }) = m({
+    0,0,3,1 }).t() * 1000;
+    return temp;   //返回转换结束的齐次矩阵
+}
+
 
 int main() {
     utils::logging::setLogLevel(utils::logging::LOG_LEVEL_ERROR);
@@ -160,7 +246,15 @@ int main() {
     TYMapDepthImageToColorCoordinate(&depth_calib, disData.cols, disData.rows, disData.ptr<uint16_t>(),
                                     &color_calib, map_disData.cols, map_disData.rows, map_disData.ptr<uint16_t>());
     imwrite("map_disData.png", map_disData);
+    Mat_<double> calib_pose = (Mat_<double>(1, 6) <<
+        0.0840643, 0.168102, -0.201074, -3.13157, 3.13194, 0.00268412
+    );
 
+
+    Mat hand_eye_mat = attitudeVectorToMatrix(calib_pose.row(0), "xyz");
+    cout << "calib_mat: \n" << hand_eye_mat << endl;
+    Eigen::Isometry3d hand_eye_eigen = Eigen::Isometry3d::Identity();
+    cv::cv2eigen(hand_eye_mat, hand_eye_eigen.matrix());
     Mat show, gray_img;
     img.copyTo(show);
     std::vector<Rect> dect = dect_v8(img);
@@ -309,11 +403,11 @@ int main() {
             ransac.getInliers(inliers);
             Eigen::VectorXf coeff;
             ransac.getModelCoefficients(coeff);
-            cout << "平面模型系数coeff(a,b,c,d): " << coeff[0] << " \t" << coeff[1] << "\t " << coeff[2] << "\t " << coeff[3] << endl;
+            cout << "plane coeff(a,b,c,d): " << coeff[0] << " \t" << coeff[1] << "\t " << coeff[2] << "\t " << coeff[3] << endl;
             Eigen::Vector4f centroid;					// TODO: 可以使用内点去求中心，提高中心定位精度；该方法要确保点云完整；
             pcl::compute3DCentroid(*cloud_passthrough, centroid);
             auto center_point = centroid.head<3>().transpose();
-            cout << "中心计算结果：" << center_point << endl;
+            cout << "center_point res：" << center_point << endl;
 
             //计算平面法向量
             Eigen::Vector3d norm;
@@ -341,7 +435,7 @@ int main() {
                 v1[2] = c1Z - center_point[2];
             }
             else {
-                cout << "v1方向转变\n";
+                cout << "Flip the v1 direction\n";
                 v1[0] = center_point[0] - c1X;
                 v1[1] = center_point[1] - c1Y;
                 v1[2] = center_point[2] - c1Z;
@@ -365,17 +459,19 @@ int main() {
             Eigen::Isometry3d RT_t_c = Eigen::Isometry3d::Identity();
             RT_t_c.rotate(R_t_c);
             RT_t_c.pretranslate(T_t_c);
-            cout << "垫板->相机:\n" << RT_t_c.matrix() << endl;
+            cout << "target->camera:\n" << RT_t_c.matrix() << endl;
             Eigen::Vector3d eulerAngle = RT_t_c.rotation().eulerAngles(2, 1, 0);
             eulerAngle[0] = eulerAngle[0] * 180 / M_PI;
             eulerAngle[1] = eulerAngle[1] * 180 / M_PI;
             eulerAngle[2] = eulerAngle[2] * 180 / M_PI;
-            cout << "欧拉角为:\n" << eulerAngle << endl;
+            cout << "eulerAngle:\n" << eulerAngle << endl;
             cout << "**************************************\n" << endl;
+
+            auto RT_t_g = hand_eye_eigen * RT_t_c;
+            cout << "RT_t_g:\n" << RT_t_g.matrix() << endl;
 
             //visualize(cloud, cloud_passthrough);
         } //else
-
     }
     imwrite("dect.png", show);
     return 0;
