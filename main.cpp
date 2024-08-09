@@ -89,43 +89,6 @@ void visualize(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud1, pcl::PointClou
     }
 }
 
-int cal_centroid(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud) {
-    // ------------------------PCL函数计算质心----------------------------
-    Eigen::Vector4f centroid;					// 质心
-    pcl::compute3DCentroid(*cloud, centroid);	// 齐次坐标，（c0,c1,c2,1）
-    // ------------------------按公式计算质心-----------------------------
-    pcl::PointXYZ p_c{ 0,0,0 }; // 列表初始化，C++11
-
-    for (auto p : cloud->points)
-    {
-        p_c.x += p.x;
-        p_c.y += p.y;
-        p_c.z += p.z;
-    }
-
-    p_c.x /= cloud->points.size();
-    p_c.y /= cloud->points.size();
-    p_c.z /= cloud->points.size();
-
-    // -------------------------- 结果对比--------------------------------
-    cout << "调用函数计算结果：" << centroid.head<3>().transpose() << endl;
-    cout << "公式计算结果：" << p_c << endl;
-    // --------------------------结果可视化-------------------------------
-    boost::shared_ptr<pcl::visualization::PCLVisualizer>viewer(new pcl::visualization::PCLVisualizer("Viewer"));
-    viewer->setBackgroundColor(255, 255, 255);
-    viewer->setWindowName("计算点云的质心");
-    pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> single_color(cloud, 0, 0, 255); // 蓝色
-    viewer->addPointCloud<pcl::PointXYZ>(cloud, single_color, "sample cloud");
-    viewer->addSphere(p_c, 0.0025, 1, 0, 0, "sphere", 0);
-    viewer->addText3D("centroid", p_c, 0.005, 128, 0, 128);
-
-    while (!viewer->wasStopped())
-    {
-        viewer->spinOnce(100);
-        std::this_thread::sleep_for(std::chrono::microseconds(10000));
-    }
-    return 0;
-}
 
 bool isRotatedMatrix(Mat& R)        //旋转矩阵的转置矩阵是它的逆矩阵，逆矩阵 * 矩阵 = 单位矩阵
 {
